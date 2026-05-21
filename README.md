@@ -9,10 +9,21 @@ A Python project to build a competitive AI agent for the card game **Coup** usin
 | Phase | Goal | Status |
 |-------|------|--------|
 | **1 — Game Engine** | Model rules, state, actions, resolution, self-play | ✅ Complete |
-| **2 — Data Pipeline** | Scrape or generate game logs, define schema | 🔜 Next |
+| **2 — Data Pipeline** | Dataset search, log parsing, large-scale simulation, feature extraction | 🔄 In Progress |
 | **3 — Belief Tracker** | Bayesian inference over hidden opponent cards | 🔜 |
 | **4 — Agent Training** | CFR self-play + neural net policy | 🔜 |
 | **5 — Live Interface** | Input game state → get best action recommendation | 🔜 |
+
+### Phase 2 sub-goals
+
+| Sub-goal | Description | Status |
+|----------|-------------|--------|
+| 2.1 — Dataset search | Search BGA / GitHub for real Coup game logs | ✅ Complete |
+| 2.2 — Log parser & validator | Load, validate, and expose a typed API over JSON logs | ✅ Complete |
+| 2.3 — Large-scale simulation | Generate 100k+ synthetic games with diverse agent configs | 🔜 Next |
+| 2.4 — Feature extraction | Convert log events into flat numpy feature vectors | 🔜 |
+| 2.5 — PyTorch Dataset | Wrap feature extractor in a `torch.utils.data.Dataset` | 🔜 |
+| 2.6 — Data quality report | Action distributions, game lengths, win rates, bluff rates | 🔜 |
 
 ---
 
@@ -34,10 +45,16 @@ coup_agent/
 │       ├── base.py              # Abstract Agent base class
 │       └── random_agent.py      # RandomAgent and HonestAgent implementations
 │
+├── pipeline/                    # Phase 2: data pipeline
+│   ├── __init__.py
+│   ├── schema.py                # Field definitions, valid enum values, value constraints
+│   └── log_parser.py            # RawLogLoader, LogValidator, ParsedGame, load_logs()
+│
 ├── tests/
 │   ├── test_cards_and_state.py  # Unit tests: deck, state, observations, legal actions
 │   ├── test_resolution.py       # Unit tests: challenge resolution, action effects
-│   └── test_game_integration.py # Integration tests: full games, log structure, invariants
+│   ├── test_game_integration.py # Integration tests: full games, log structure, invariants
+│   └── test_log_parser.py       # Unit + round-trip tests for the log parser
 │
 ├── simulator.py                 # Self-play CLI and API for generating training data
 ├── data/
@@ -81,7 +98,37 @@ game = Game(agents=agents, seed=42, verbose=True)
 log = game.play_game()
 ```
 
-### Generate training data
+### Load and validate game logs
+
+```python
+from pipeline.log_parser import load_logs
+
+# Load all logs from a directory — invalid logs are skipped silently
+games = load_logs("data/raw_logs/")
+print(f"{len(games)} games loaded")
+
+# Strict mode — raises ValueError on any invalid log
+games = load_logs("data/raw_logs/", strict=True)
+
+# Verbose mode — prints a status line per file
+games = load_logs("data/raw_logs/", verbose=True)
+
+# Inspect a game
+game = games[0]
+print(game.winner_name, game.total_turns)
+for action in game.action_events:
+    print(action.actor_name, action.action_type, action.claimed_card)
+```
+
+### Validate a single log dict
+
+```python
+from pipeline.log_parser import validate_log
+
+result = validate_log(my_log_dict)
+print(result.is_valid)   # True / False
+print(result.summary())  # Full error + warning report
+```
 
 ```bash
 # 1,000 games, 4 players, logs saved to data/raw_logs/
@@ -99,7 +146,15 @@ logs = run_simulation(n_games=500, n_players=4, seed=0)
 
 ## Running the Tests
 
-There are **three test files**, each covering a distinct layer of the engine.
+There are **four test files**, each covering a distinct layer of the project. Total: **164 tests**.
+
+```bash
+# Run everything
+python -m pytest tests/ -v
+
+# With coverage
+python -m pytest tests/ --cov=coup --cov-report=term-missing
+```
 
 ### `tests/test_cards_and_state.py` — Unit tests (46 tests)
 
@@ -145,6 +200,25 @@ Runs complete games end-to-end. Does not test internals — only observable outc
 
 ```bash
 python -m pytest tests/test_game_integration.py -v
+```
+
+### `tests/test_log_parser.py` — Unit + round-trip tests (72 tests)
+
+Tests the full Phase 2 parsing and validation pipeline.
+
+| Class | What it tests |
+|-------|--------------|
+| `TestTopLevelValidation` | Required top-level keys; player count range (2–6); n_players/player_names consistency; non-dict input |
+| `TestEventValidation` | Unknown event types; missing turn number; missing actor fields; player index out of range; invalid action types and card names; all valid enum values pass; `influence_remaining` bounds |
+| `TestStateSnapshotValidation` | Wrong player count in snapshot; negative coins; invalid revealed cards; missing snapshot fields; high coin count triggers warning not error |
+| `TestGameConsistency` | First event must be `game_start`; last event must be `game_end`; no action events → invalid; missing winner produces warning (not error) for turn-limit games |
+| `TestRawLogLoader` | Valid file loading; malformed JSON error capture; missing file error; directory iteration skips non-JSON files; malformed files in directory don't stop iteration |
+| `TestParsedGame` | `events_of_type`, property accessors, `winner_name`, `total_turns`, `len`, iteration, `iter_action_contexts`, typed field access on `ParsedEvent` |
+| `TestLoadLogs` | Directory loading; single file loading; invalid logs silently skipped; strict mode raises; source not found raises; `source_path` set; malformed JSON skipped |
+| `TestRoundTrip` | Every simulator-generated log in `data/raw_logs/` loads without error and passes strict validation; all `ParsedGame` objects have correct structure |
+
+```bash
+python -m pytest tests/test_log_parser.py -v
 ```
 
 ---
@@ -273,12 +347,44 @@ The full log schema (what each event type records) is documented in the module d
 
 ---
 
-## What Phase 2 will add
+## Phase 2 — Implementation Notes
 
-- A scraper/search for Coup game logs on BoardGameArena or GitHub
-- If no public dataset exists: a high-volume simulator run (100k+ games with mixed agents) to generate a synthetic training corpus
-- A log replay tool (feed a saved JSON log back through the engine and verify it is valid)
-- Feature extraction: convert a game log into a tensor suitable for a neural network
+### Sub-goal 2.1 — Dataset search
+
+A thorough search of BoardGameArena, GitHub, Kaggle, and academic sources confirmed that **no public Coup game log dataset exists**. The only known dataset is used internally by the official Coup mobile app and is private. Every published Coup AI project independently reaches the same conclusion and uses self-play simulation instead.
+
+BGA does have replay data accessible via scraping, but it presents three blockers: it requires a paid account, enforces daily rate limits on replay access, and the raw HTML log format would require substantial parsing work for uncertain yield. Crucially, even scraped human games would have the same hidden-information structure as synthetic ones — opponents' hands are not revealed unless challenged — so human data offers no structural advantage over high-volume simulation at this stage.
+
+**Decision:** generate all training data synthetically using the Phase 1 simulator with diverse agent configurations (varying `challenge_prob`, `block_prob`, player counts, and agent types). This is the standard approach for hidden-information game AI.
+
+---
+
+### Sub-goal 2.2 — Log parser and validator
+
+The parser lives in `pipeline/` and is split into two files following the same zero-coupling principle as the game engine: `schema.py` holds all rule knowledge as pure data, `log_parser.py` holds all logic.
+
+**`pipeline/schema.py`** is the single source of truth for what a valid log looks like. It defines the required fields for every event type, the set of valid enum values for cards and action types, and numeric constraints (max coins, max influence, player count range). It has zero imports from the game engine — the pipeline can be used, tested, and extended without the game library installed.
+
+**`pipeline/log_parser.py`** is structured as three layers that compose cleanly:
+
+`RawLogLoader` handles I/O: reading a single JSON file or iterating a directory. It returns `(dict, error_string)` tuples so every failure mode is captured without exceptions propagating. A non-JSON file in the directory is silently skipped; a malformed JSON file returns an error string but does not stop iteration. This makes batch loading robust to partial corruption.
+
+`LogValidator` runs three tiers of checks in order, stopping early if the structure is too broken to continue. Tier 1 checks top-level keys and player count consistency. Tier 2 iterates every event and checks field presence, value types, enum membership, and player index bounds. Tier 3 checks game-level consistency: event ordering, turn monotonicity, and that a winner is recorded. The validator distinguishes errors (structural violations that make the log unusable for training) from warnings (anomalies that are legal but worth knowing about, like a game that ended at the turn limit without a winner).
+
+`ParsedGame` is a typed wrapper that exposes convenient accessors for downstream code. The feature extractor in Sub-goal 2.4 will call `game.action_events` and `game.iter_action_contexts()` rather than scanning raw dicts. `iter_action_contexts()` is the key method: it yields each action event paired with the reactions that followed it (challenges, blocks, resolutions), which is exactly the context window needed to build labelled training examples.
+
+`load_logs(source, strict, verbose)` is the single public entry point for all downstream consumers. In non-strict mode (the default) it silently filters out invalid logs and reports a summary count. In strict mode it raises on the first invalid log, useful in CI to catch any simulator regression.
+
+The round-trip test class (`TestRoundTrip`) validates every log currently in `data/raw_logs/` under strict mode. This test runs as part of the normal test suite and will catch any future changes to `logger.py` that break the schema.
+
+---
+
+## What Phase 2 still needs (sub-goals 2.3–2.6)
+
+- **2.3 Large-scale simulation** — run 100k+ games with mixed agent configurations and diverse player counts; save efficiently to `data/raw_logs/`
+- **2.4 Feature extraction** — convert a `(ParsedGame, event_index)` pair into a flat numpy vector ready for model input
+- **2.5 PyTorch Dataset** — wrap the feature extractor in `torch.utils.data.Dataset` for use in training loops
+- **2.6 Data quality report** — action frequency distributions, game length histograms, win rates by seat, bluff detection rates
 
 ---
 
