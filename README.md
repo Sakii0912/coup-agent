@@ -9,8 +9,8 @@ A Python project to build a competitive AI agent for the card game **Coup** usin
 | Phase | Goal | Status |
 |-------|------|--------|
 | **1 — Game Engine** | Model rules, state, actions, resolution, self-play | ✅ Complete |
-| **2 — Data Pipeline** | Dataset search, log parsing, large-scale simulation, feature extraction | 🔄 In Progress |
-| **3 — Belief Tracker** | Bayesian inference over hidden opponent cards | 🔜 |
+| **2 — Data Pipeline** | Dataset search, log parsing, large-scale simulation, feature extraction | ✅ Complete |
+| **3 — Belief Tracker** | Bayesian inference over hidden opponent cards | 🔜 Next |
 | **4 — Agent Training** | CFR self-play + neural net policy | 🔜 |
 | **5 — Live Interface** | Input game state → get best action recommendation | 🔜 |
 
@@ -20,10 +20,10 @@ A Python project to build a competitive AI agent for the card game **Coup** usin
 |----------|-------------|--------|
 | 2.1 — Dataset search | Search BGA / GitHub for real Coup game logs | ✅ Complete |
 | 2.2 — Log parser & validator | Load, validate, and expose a typed API over JSON logs | ✅ Complete |
-| 2.3 — Large-scale simulation | Generate 100k+ synthetic games with diverse agent configs | 🔜 Next |
-| 2.4 — Feature extraction | Convert log events into flat numpy feature vectors | 🔜 |
-| 2.5 — PyTorch Dataset | Wrap feature extractor in a `torch.utils.data.Dataset` | 🔜 |
-| 2.6 — Data quality report | Action distributions, game lengths, win rates, bluff rates | 🔜 |
+| 2.3 — Large-scale simulation | 18-batch corpus generator across agent types, player counts, bluff rates | ✅ Complete |
+| 2.4 — Feature extraction | Convert log events into 104-dim float32 numpy vectors | ✅ Complete |
+| 2.5 — PyTorch Dataset | `CoupDataset` and `CoupStreamingDataset` with split, save, load | ✅ Complete |
+| 2.6 — Data quality report | Action distributions, win rates, bluff rates, feature stats | ✅ Complete |
 
 ---
 
@@ -32,33 +32,45 @@ A Python project to build a competitive AI agent for the card game **Coup** usin
 ```
 coup_agent/
 │
-├── coup/                        # Core game library
-│   ├── __init__.py              # Public API exports
-│   ├── cards.py                 # Card/ActionType enums, game constants
-│   ├── state.py                 # PlayerState, GameState, Observation dataclasses
-│   ├── actions.py               # Action/Block dataclasses, legal action generator
-│   ├── resolution.py            # Challenge resolution and action effect application
-│   ├── logger.py                # Structured event logger (JSON-serialisable)
-│   ├── game.py                  # Game orchestrator — full turn loop
+├── coup/                           # Phase 1: core game library
+│   ├── __init__.py                 # Public API exports
+│   ├── cards.py                    # Card/ActionType enums, game constants
+│   ├── state.py                    # PlayerState, GameState, Observation dataclasses
+│   ├── actions.py                  # Action/Block dataclasses, legal action generator
+│   ├── resolution.py               # Challenge resolution and action effect application
+│   ├── logger.py                   # Structured event logger (JSON-serialisable)
+│   ├── game.py                     # Game orchestrator — full turn loop
 │   └── agents/
 │       ├── __init__.py
-│       ├── base.py              # Abstract Agent base class
-│       └── random_agent.py      # RandomAgent and HonestAgent implementations
+│       ├── base.py                 # Abstract Agent base class (6 decision points)
+│       └── random_agent.py         # RandomAgent and HonestAgent implementations
 │
-├── pipeline/                    # Phase 2: data pipeline
+├── pipeline/                       # Phase 2: data pipeline
 │   ├── __init__.py
-│   ├── schema.py                # Field definitions, valid enum values, value constraints
-│   └── log_parser.py            # RawLogLoader, LogValidator, ParsedGame, load_logs()
+│   ├── schema.py                   # Field definitions, valid enum values, value constraints
+│   ├── log_parser.py               # RawLogLoader, LogValidator, ParsedGame, load_logs()
+│   ├── large_scale_sim.py          # 18-config corpus generator, ~370 games/sec
+│   ├── feature_extractor.py        # ParsedGame → 104-dim float32 feature vectors + labels
+│   ├── dataset.py                  # CoupDataset, CoupStreamingDataset, build_dataset()
+│   └── data_quality.py             # Corpus statistics and formatted quality report
 │
 ├── tests/
-│   ├── test_cards_and_state.py  # Unit tests: deck, state, observations, legal actions
-│   ├── test_resolution.py       # Unit tests: challenge resolution, action effects
-│   ├── test_game_integration.py # Integration tests: full games, log structure, invariants
-│   └── test_log_parser.py       # Unit + round-trip tests for the log parser
+│   ├── test_cards_and_state.py     # Unit: deck, state, observations, legal actions (46)
+│   ├── test_resolution.py          # Unit: challenge resolution, action effects (15)
+│   ├── test_game_integration.py    # Integration: full games, log structure, invariants (31)
+│   ├── test_log_parser.py          # Unit + round-trip: parser and validator (72)
+│   └── test_pipeline_phase2.py     # Unit + integration: sim, features, dataset, report (70)
 │
-├── simulator.py                 # Self-play CLI and API for generating training data
+├── simulator.py                    # Single-config self-play CLI (quick runs / dev)
 ├── data/
-│   └── raw_logs/                # Output directory for game log JSON files
+│   ├── raw_logs/                   # Game log JSON files, one subdir per batch config
+│   │   ├── random_2p_low/
+│   │   ├── random_4p_med/
+│   │   ├── honest_4p/
+│   │   ├── mixed_4p/
+│   │   └── …                       # 18 subdirectories total
+│   ├── dataset_action.npz          # Pre-extracted CoupDataset (action prediction task)
+│   └── quality_report.txt          # Latest data quality report
 └── requirements.txt
 ```
 
@@ -72,22 +84,15 @@ coup_agent/
 pip install -r requirements.txt
 ```
 
-### Run the test suite
+### Run the full test suite
 
 ```bash
-# All tests with verbose output
-python -m pytest tests/ -v
-
-# Specific test file
-python -m pytest tests/test_cards_and_state.py -v
-python -m pytest tests/test_resolution.py -v
-python -m pytest tests/test_game_integration.py -v
-
-# With coverage report
+python -m pytest tests/ -v          # 234 tests, all should pass
+python -m pytest tests/ -q          # quiet summary
 python -m pytest tests/ --cov=coup --cov-report=term-missing
 ```
 
-### Play a single game (verbose)
+### Play a single game (verbose turn-by-turn output)
 
 ```python
 from coup.game import Game
@@ -98,128 +103,123 @@ game = Game(agents=agents, seed=42, verbose=True)
 log = game.play_game()
 ```
 
-### Load and validate game logs
+### Generate the full training corpus (100k games, ~5 min)
+
+```bash
+python -m pipeline.large_scale_sim --total 100000 --output_dir data/raw_logs --seed 0
+python -m pipeline.large_scale_sim --total 100000 --dry_run    # preview plan only
+```
+
+### Load and inspect game logs
 
 ```python
 from pipeline.log_parser import load_logs
 
-# Load all logs from a directory — invalid logs are skipped silently
-games = load_logs("data/raw_logs/")
-print(f"{len(games)} games loaded")
-
-# Strict mode — raises ValueError on any invalid log
-games = load_logs("data/raw_logs/", strict=True)
-
-# Verbose mode — prints a status line per file
-games = load_logs("data/raw_logs/", verbose=True)
-
-# Inspect a game
+games = load_logs("data/raw_logs/random_4p_med/")
 game = games[0]
 print(game.winner_name, game.total_turns)
 for action in game.action_events:
     print(action.actor_name, action.action_type, action.claimed_card)
 ```
 
-### Validate a single log dict
+### Extract features and build a training dataset
 
 ```python
-from pipeline.log_parser import validate_log
+from pipeline.dataset import build_dataset
+from torch.utils.data import DataLoader
 
-result = validate_log(my_log_dict)
-print(result.is_valid)   # True / False
-print(result.summary())  # Full error + warning report
+ds = build_dataset("data/raw_logs", task="action", save_path="data/dataset_action.npz")
+train, val = ds.split(val_fraction=0.1)
+
+loader = DataLoader(train, batch_size=256, shuffle=True)
+x_batch, y_batch = next(iter(loader))   # x: (256, 104)  y: (256,)
 ```
 
+### Load a pre-built dataset
+
+```python
+from pipeline.dataset import CoupDataset
+ds = CoupDataset.load("data/dataset_action.npz", task="action")
+```
+
+### Run the data quality report
+
 ```bash
-# 1,000 games, 4 players, logs saved to data/raw_logs/
-python simulator.py --n_games 1000 --n_players 4 --seed 42
-
-# 5,000 games, 3 players, mixed agent types
-python simulator.py --n_games 5000 --n_players 3 --agent mixed
-
-# Programmatic API
-from simulator import run_simulation
-logs = run_simulation(n_games=500, n_players=4, seed=0)
+python -m pipeline.data_quality --log_dir data/raw_logs --output data/quality_report.txt
 ```
 
 ---
 
 ## Running the Tests
 
-There are **four test files**, each covering a distinct layer of the project. Total: **164 tests**.
+Five test files, **234 tests** total.
 
 ```bash
-# Run everything
 python -m pytest tests/ -v
-
-# With coverage
-python -m pytest tests/ --cov=coup --cov-report=term-missing
+python -m pytest tests/test_cards_and_state.py -v
+python -m pytest tests/test_resolution.py -v
+python -m pytest tests/test_game_integration.py -v
+python -m pytest tests/test_log_parser.py -v
+python -m pytest tests/test_pipeline_phase2.py -v
 ```
 
-### `tests/test_cards_and_state.py` — Unit tests (46 tests)
-
-Tests the lowest-level building blocks.
+### `tests/test_cards_and_state.py` — 46 tests
 
 | Class | What it tests |
 |-------|--------------|
 | `TestDeck` | Deck has exactly 15 cards, 3 of each type |
 | `TestGameStateInit` | Correct dealing, coin assignment, seeded reproducibility, player count validation |
 | `TestPlayerState` | `lose_influence`, `swap_card`, `has_card`, `public_view` (hides hand) |
-| `TestObservation` | Player sees own hand, opponents' hands hidden, JSON serialisable, dead-player turn skip |
-| `TestLegalActions` | Income/Foreign Aid/Tax/Exchange always available; Coup ≥ 7 coins; must-coup at 10; Assassinate ≥ 3; Steal vs 0-coin targets; correct target lists; dead players excluded |
-| `TestLegalBlocks` | Each action blocked by the correct cards; unblockable actions return empty |
+| `TestObservation` | Player sees own hand; opponents' hands hidden; JSON-serialisable; dead-player turn skip |
+| `TestLegalActions` | All coin rules; must-coup at 10; Steal vs 0-coin targets; dead players excluded |
+| `TestLegalBlocks` | Each action blocked by correct cards; unblockable actions return empty list |
 
-```bash
-python -m pytest tests/test_cards_and_state.py -v
-```
-
-### `tests/test_resolution.py` — Unit tests (15 tests)
-
-Tests the pure resolution functions in isolation, using hand-crafted game states.
+### `tests/test_resolution.py` — 15 tests
 
 | Class | What it tests |
 |-------|--------------|
-| `TestResolveChallenge` | Actor wins when they hold the card (challenger loses influence, card swapped); bluffer loses when they don't (actor loses influence) |
-| `TestApplyActionEffect` | Income (+1), Foreign Aid (+2), Tax (+3), Coup (−7 coins, target loses influence, death), Assassinate (influence loss), Steal (2-coin transfer, partial transfer at 1 coin, zero-coin no-op), Exchange (hand size preserved, cards returned to deck, invalid keep count raises) |
+| `TestResolveChallenge` | Actor wins when card held (challenger loses, card swapped); bluffer loses when not |
+| `TestApplyActionEffect` | All 7 action effects: coin changes, influence loss, steal partial transfer, Exchange hand-size invariant |
 
-```bash
-python -m pytest tests/test_resolution.py -v
-```
-
-### `tests/test_game_integration.py` — Integration tests (31 tests)
-
-Runs complete games end-to-end. Does not test internals — only observable outcomes.
+### `tests/test_game_integration.py` — 31 tests
 
 | Class | What it tests |
 |-------|--------------|
-| `TestGameTermination` | Games terminate with exactly one winner for all player counts (2–6) and multiple seeds; winner is the only alive player; log starts with `game_start`, ends with `game_end` |
-| `TestLogStructure` | Log has required keys; all action events carry `actor_idx` and `action_type`; log is JSON-serialisable; influence loss events name the card |
-| `TestInvariants` | No player ever has negative coins; no player holds more than 2 cards; total cards in deck + hands + revealed = 15 (conservation) |
-| `TestAgentVariety` | HonestAgent-only games; mixed RandomAgent/HonestAgent; extreme challenge/block probabilities (0.0 and 0.9) still terminate |
-| `TestSimulator` | `run_simulation` returns exactly N logs; logs are valid JSON with a `game_end` event |
+| `TestGameTermination` | Games terminate with exactly one winner for all player counts (2–6) and multiple seeds |
+| `TestLogStructure` | Log has required keys; JSON-serialisable; influence loss events name the card |
+| `TestInvariants` | No negative coins; no player holds >2 cards; total cards always = 15 (conservation) |
+| `TestAgentVariety` | HonestAgent-only games; mixed agents; extreme challenge/block probabilities |
+| `TestSimulator` | `run_simulation` returns exactly N logs; logs contain `game_end` event |
 
-```bash
-python -m pytest tests/test_game_integration.py -v
-```
-
-### `tests/test_log_parser.py` — Unit + round-trip tests (72 tests)
-
-Tests the full Phase 2 parsing and validation pipeline.
+### `tests/test_log_parser.py` — 72 tests
 
 | Class | What it tests |
 |-------|--------------|
-| `TestTopLevelValidation` | Required top-level keys; player count range (2–6); n_players/player_names consistency; non-dict input |
-| `TestEventValidation` | Unknown event types; missing turn number; missing actor fields; player index out of range; invalid action types and card names; all valid enum values pass; `influence_remaining` bounds |
-| `TestStateSnapshotValidation` | Wrong player count in snapshot; negative coins; invalid revealed cards; missing snapshot fields; high coin count triggers warning not error |
-| `TestGameConsistency` | First event must be `game_start`; last event must be `game_end`; no action events → invalid; missing winner produces warning (not error) for turn-limit games |
-| `TestRawLogLoader` | Valid file loading; malformed JSON error capture; missing file error; directory iteration skips non-JSON files; malformed files in directory don't stop iteration |
-| `TestParsedGame` | `events_of_type`, property accessors, `winner_name`, `total_turns`, `len`, iteration, `iter_action_contexts`, typed field access on `ParsedEvent` |
-| `TestLoadLogs` | Directory loading; single file loading; invalid logs silently skipped; strict mode raises; source not found raises; `source_path` set; malformed JSON skipped |
-| `TestRoundTrip` | Every simulator-generated log in `data/raw_logs/` loads without error and passes strict validation; all `ParsedGame` objects have correct structure |
+| `TestTopLevelValidation` | Required keys; player count range; n_players/player_names consistency |
+| `TestEventValidation` | Unknown event types; missing fields; player index bounds; invalid enum values |
+| `TestStateSnapshotValidation` | Wrong player count; negative coins; invalid revealed cards; missing snapshot fields |
+| `TestGameConsistency` | First/last event ordering; no action events; missing winner warning |
+| `TestRawLogLoader` | Valid file; malformed JSON; missing file; directory iteration; mixed valid/invalid |
+| `TestParsedGame` | Typed accessors, `winner_name`, `total_turns`, `iter_action_contexts` |
+| `TestLoadLogs` | Directory loading; strict mode; invalid logs skipped; `source_path` set |
+| `TestRoundTrip` | Every simulator-generated log in `data/raw_logs/` passes strict validation |
 
-```bash
-python -m pytest tests/test_log_parser.py -v
-```
+### `tests/test_pipeline_phase2.py` — 70 tests
+
+| Class | What it tests |
+|-------|--------------|
+| `TestBatchConfig` | Config list non-empty; valid player counts; unique names; positive weights |
+| `TestRunLargeScale` | Dry run creates no files; game allocation sums to total; logs are valid JSON; seeded reproducibility |
+| `TestFeatureConfig` | Feature dim = 104; opponent slots; smaller configs produce shorter vectors |
+| `TestExtractFeatures` | Sample count matches action events; shape (104,); dtype float32; label ranges; no NaN/Inf; action label matches event; all player counts produce same-size vector |
+| `TestExtractDataset` | Four arrays returned; shapes consistent; correct dtypes |
+| `TestCoupDataset` | len, getitem, all three tasks, feature_dim, n_classes, normalisation, split, save/load, DataLoader |
+| `TestCoupStreamingDataset` | len matches sample count; getitem; feature_dim; n_classes |
+| `TestBuildDataset` | End-to-end from directory; saves .npz |
+| `TestCorpusStatsAccumulation` | Game count; turn lengths; all action types seen; win totals; influence losses; player count dist |
+| `TestQualityReport` | Summary is string; all sections present; all action names present; save to file; feature stats populated |
+| `TestRunQualityReport` | Returns QualityReport; saves output file |
+| `TestFullPipelineRoundTrip` | Raw logs → ParsedGame → features → CoupDataset end-to-end |
 
 ---
 
@@ -227,110 +227,57 @@ python -m pytest tests/test_log_parser.py -v
 
 ### Design philosophy
 
-The engine is built around three principles that matter for all later phases:
+Three principles underpin the engine and carry forward to all later phases:
 
-**1. Strict separation of god-view and agent-view.** `GameState` holds all information including hidden cards. Agents never receive a `GameState` — they receive an `Observation`, which is the subset of information that player is entitled to see. This separation is enforced structurally, not by convention. When Phase 3 adds a belief tracker, the Observation gains a `belief_state` field and no other code changes.
+**1. Strict god-view / agent-view separation.** `GameState` holds all information including hidden cards. Agents never receive a `GameState` — they receive an `Observation`, the subset of information they are entitled to see. This is enforced structurally. In Phase 3, `Observation` gains a `belief_state` field and nothing else in the agent interface changes.
 
-**2. Immutable action objects.** `Action` and `Block` are frozen dataclasses. This means they can be stored in logs, compared safely, and passed to multiple functions without risk of mutation. It also makes it straightforward to enumerate all legal actions as a plain Python list.
+**2. Immutable action objects.** `Action` and `Block` are frozen dataclasses. They can be stored in logs, compared safely, and passed to multiple functions without mutation risk. Enumerating legal actions returns a plain Python list of distinct atomic actions — one per (type, target) pair.
 
-**3. Callbacks instead of coupling.** Resolution functions (`resolve_challenge`, `apply_action_effect`) never call agent methods directly. They receive callbacks (`lose_influence_callback`, `exchange_callback`) injected by `Game`. This keeps the resolution logic pure and testable with simple lambdas, and means Phase 4 agents slot in without touching resolution code.
+**3. Callbacks instead of coupling.** Resolution functions (`resolve_challenge`, `apply_action_effect`) never call agent methods directly. They receive callbacks (`lose_influence_callback`, `exchange_callback`) injected by `Game`. Resolution logic stays pure and testable with simple lambdas, and Phase 4 agents slot in without touching it.
 
 ---
 
 ### `cards.py` — Enums and constants
 
-All game rules that are pure data (no logic) live here.
-
-`ACTION_CLAIMS` maps each character action to the card it requires. During a challenge, the engine looks up the claimed card from this dict — if the actor doesn't hold it, they were bluffing.
-
-`BLOCK_MAP` maps each blockable action to the list of cards that can block it. Foreign Aid is blocked by Duke. Steal is blocked by Captain or Ambassador (either card is a valid block claim, which is why the value is a list). This dict drives `get_legal_blocks` in `actions.py`.
-
-`DECK_COMPOSITION` is the canonical 15-card deck (3× each card). Every new game shuffles a copy of this list and deals from it.
+All game rules that are pure data live here. `ACTION_CLAIMS` maps each character action to its required card. `BLOCK_MAP` maps each blockable action to the list of cards that can block it — Steal maps to `[Captain, Ambassador]` because either is a valid block claim. `DECK_COMPOSITION` is the canonical 15-card deck (3× each card) copied and shuffled at game start.
 
 ---
 
 ### `state.py` — Data structures
 
-**`PlayerState`** is intentionally mutable. Fields mutated during a game: `hand` (cards drawn/lost/swapped), `revealed` (cards flipped face-up), `coins`. The `public_view()` method returns a dict with `influence_count` (number of remaining hidden cards) but omits `hand` entirely — this is what opponents see.
+`PlayerState` is intentionally mutable: `hand`, `revealed`, and `coins` change during a game. `public_view()` returns `influence_count` (number of hidden cards) but omits `hand` entirely — this is all opponents can see.
 
-**`GameState.new_game()`** is the only constructor used in normal play. It shuffles the deck, deals 2 cards and 2 coins to each player, and sets `current_player_idx = 0`. Passing a `seed` makes the deal fully reproducible, which is critical for running the same test scenario repeatedly.
+`GameState.new_game()` is the only normal constructor. Passing `seed` makes the deal fully reproducible, critical for test scenarios. `advance_turn()` skips dead players while keeping their slot so indices stay stable.
 
-**`GameState.advance_turn()`** skips dead players automatically. Dead players keep their slot in `players` (so indices stay stable) but are simply skipped when iterating.
-
-**`Observation`** is the data structure passed to every agent decision method. It currently contains: own hand, own coins, own revealed cards, public view of all other players, deck size, and whose turn it is. In Phase 3, a `belief_state` field will be added here — a probability matrix over each opponent's possible cards — without any other changes to the agent interface.
+`Observation` is the per-player view passed to every agent decision. It currently carries: own hand, own coins, own revealed cards, public view of all other players, deck size, current player index, and turn number. In Phase 3 a `belief_state` field will be added here with no other interface changes.
 
 ---
 
 ### `actions.py` — Legal move generation
 
-`get_legal_actions` enforces all coin constraints and the must-coup rule. The must-coup rule is important to implement correctly: at 10+ coins the function returns *only* Coup actions (one per alive opponent). No other action is legal. This is what the rule actually says — it is not just a strong recommendation.
+`get_legal_actions` enforces all coin constraints and the must-coup rule. At 10+ coins the function returns *only* Coup actions — no other action is legal, not even Income. Steal only targets players with ≥ 1 coin. Every targeted action generates one `Action` per valid target, keeping actions atomic for the policy output.
 
-Steal has a special constraint: `target.coins > 0`. A player with 0 coins is not a valid steal target. This prevents generating actions whose effect would be a no-op, which could confuse a policy network.
-
-Every targeted action generates one `Action` per valid target (rather than one action with a target list). This keeps actions atomic and makes the policy output a flat choice over a well-defined set.
-
-`get_legal_blocks` returns one `Block` per card that can legally be claimed. For Steal, two blocks are generated (claiming Captain, or claiming Ambassador). The blocker does not have to actually hold the card — bluffing a block is always legal. The challenge system handles proof of the claim.
+`get_legal_blocks` returns one `Block` per claimable card. Bluffing a block is always legal — the challenge system handles proof.
 
 ---
 
 ### `resolution.py` — Challenge and effect logic
 
-**Challenge resolution** is the core mechanic where hidden information becomes observable. The sequence is:
+**Challenge resolution:** if the actor holds the claimed card they win — the challenger loses an influence and the actor swaps their proved card for a fresh draw (removing the information gain). If the actor was bluffing, the challenger wins and the actor loses an influence.
 
-1. Check if actor's hand contains the claimed card.
-2. If yes (actor wins): call `lose_influence_callback(challenger_idx)` then `PlayerState.swap_card()` on the actor. The swap is mandatory — the actor returns their proved card to the deck and draws a fresh one, removing the information advantage the challenger just gained.
-3. If no (challenger wins): call `lose_influence_callback(actor_idx)`.
-
-The `lose_influence_callback` pattern is how the engine asks an agent which card to reveal without coupling resolution logic to the agent class hierarchy. In tests, a lambda (`return 0`) is sufficient.
-
-**`apply_action_effect`** is only called after all challenges and blocks have resolved in favour of the action proceeding. The Assassinate coin cost (3) is deducted in `game.py` when the action is *declared*, before any challenge. This matches the real rules: the coins are spent on the attempt, not the outcome. If the assassination is blocked or the assassin loses a challenge, the coins are still gone.
-
-**Exchange** uses a second callback (`exchange_callback`) to ask the actor which cards to keep. The function draws up to 2 cards from the deck, combines them with the actor's hand into `all_options`, calls the callback to get keep indices, then returns unchosen cards to the deck and reshuffles. The deck reshuffle after every exchange is important — it prevents an observer from inferring deck composition by watching what is returned.
+**`apply_action_effect`** is called only after all reactions resolve in the action's favour. The Assassinate coin cost (3) is deducted in `game.py` when declared, not here — coins are spent on the attempt regardless of outcome. Exchange draws up to 2 cards, lets the actor choose which to keep, and reshuffles the deck after returning unchosen cards to prevent deck composition inference.
 
 ---
 
 ### `game.py` — Turn orchestrator
 
-`Game._play_turn()` implements the full reactive turn structure:
-
-```
-1. Actor chooses action
-   → if action costs coins (Assassinate): deduct immediately
-2. If action is challengeable:
-   → poll other alive players in seat order
-   → first challenger triggers resolve_challenge()
-   → actor loses → action fails and turn ends
-   → actor wins → action continues
-3. If action is blockable (and step 2 passed or was skipped):
-   → poll eligible blockers (all players for Foreign Aid, target only for Steal/Assassinate)
-   → if blocked: run block challenge phase (same structure as step 2)
-   → block survives → action fails and turn ends
-   → block challenged and fails → action continues
-4. Apply action effect
-```
-
-Players are polled in seat order starting from the player immediately after the actor. The first player who challenges or blocks stops the polling — subsequent players in that round don't get to react. This matches the actual rules.
-
-The `MAX_TURNS = 500` guard prevents infinite loops in degenerate cases (e.g., all passive agents accumulating coins and never couping). In practice, random games rarely exceed 80–100 turns.
-
----
-
-### `logger.py` — Event log
-
-Every observable event is recorded as a `LogEvent` with its turn number and a dict of relevant fields. The log is the training data for all later phases. The key design decision is that the log only records *observable* information — it never logs hidden cards unless they are revealed through a challenge or influence loss. This mirrors what a human player can see and keeps the training signal honest.
-
-The full log schema (what each event type records) is documented in the module docstring. Events you should know:
-
-- `action` — actor, action type, claimed card, target, public state snapshot
-- `challenge_result` — winner and loser indices (lets you reconstruct who was bluffing)
-- `influence_loss` — which card was revealed (the most information-rich event)
-- `game_end` — winner, total turns
+`_play_turn()` implements the reactive sequence: declare action → optional challenge → optional block → optional block challenge → apply effect. Players are polled in seat order; the first challenger or blocker stops the loop. `MAX_TURNS = 500` guards against infinite loops — in practice random games rarely exceed 80 turns.
 
 ---
 
 ### `agents/` — Agent architecture
 
-`Agent` (abstract base class) defines six decision points that every agent must implement. The six methods map directly to the six moments in a turn where a player must make a choice:
+`Agent` (abstract base class) defines six decision points:
 
 | Method | Called when |
 |--------|-------------|
@@ -341,9 +288,7 @@ The full log schema (what each event type records) is documented in the module d
 | `choose_card_to_lose` | You must reveal an influence card |
 | `choose_exchange_cards` | You played Ambassador Exchange |
 
-`RandomAgent` implements all six uniformly at random, with configurable `challenge_prob` and `block_prob`. These two parameters are the main dials for generating diverse training data — games with `challenge_prob=0.0` play very differently from games with `challenge_prob=0.8`.
-
-`HonestAgent` extends `RandomAgent` but overrides `choose_action` (only plays actions it holds the card for) and `choose_to_block` (only blocks with cards it actually holds). It challenges more often when it holds the claimed card (reducing the probability the claim is true). This agent is useful as a benchmark: a policy that loses to `HonestAgent` has not learned anything useful.
+`RandomAgent` implements all six uniformly at random with configurable `challenge_prob` and `block_prob`. `HonestAgent` extends it: only plays actions it actually holds cards for, only blocks with cards it holds, and challenges more often when it already holds the claimed card.
 
 ---
 
@@ -351,46 +296,86 @@ The full log schema (what each event type records) is documented in the module d
 
 ### Sub-goal 2.1 — Dataset search
 
-A thorough search of BoardGameArena, GitHub, Kaggle, and academic sources confirmed that **no public Coup game log dataset exists**. The only known dataset is used internally by the official Coup mobile app and is private. Every published Coup AI project independently reaches the same conclusion and uses self-play simulation instead.
+A thorough search of BoardGameArena, GitHub, Kaggle, and academic sources confirmed **no public Coup game log dataset exists**. BGA replay data is accessible via scraping but requires a paid account, enforces daily rate limits, and even scraped human games have the same hidden-information structure — opponents' hands are not revealed unless challenged. Human data offers no structural advantage over high-volume simulation at this stage.
 
-BGA does have replay data accessible via scraping, but it presents three blockers: it requires a paid account, enforces daily rate limits on replay access, and the raw HTML log format would require substantial parsing work for uncertain yield. Crucially, even scraped human games would have the same hidden-information structure as synthetic ones — opponents' hands are not revealed unless challenged — so human data offers no structural advantage over high-volume simulation at this stage.
-
-**Decision:** generate all training data synthetically using the Phase 1 simulator with diverse agent configurations (varying `challenge_prob`, `block_prob`, player counts, and agent types). This is the standard approach for hidden-information game AI.
+**Decision:** generate all training data synthetically with diverse agent configurations. This is the standard approach for hidden-information game AI.
 
 ---
 
 ### Sub-goal 2.2 — Log parser and validator
 
-The parser lives in `pipeline/` and is split into two files following the same zero-coupling principle as the game engine: `schema.py` holds all rule knowledge as pure data, `log_parser.py` holds all logic.
+`pipeline/schema.py` is the single source of truth for valid log structure. It has zero imports from the game engine — the pipeline can run standalone.
 
-**`pipeline/schema.py`** is the single source of truth for what a valid log looks like. It defines the required fields for every event type, the set of valid enum values for cards and action types, and numeric constraints (max coins, max influence, player count range). It has zero imports from the game engine — the pipeline can be used, tested, and extended without the game library installed.
+`pipeline/log_parser.py` has three layers:
 
-**`pipeline/log_parser.py`** is structured as three layers that compose cleanly:
+`RawLogLoader` handles I/O and returns `(dict, error_string)` tuples so every failure is captured without propagating exceptions.
 
-`RawLogLoader` handles I/O: reading a single JSON file or iterating a directory. It returns `(dict, error_string)` tuples so every failure mode is captured without exceptions propagating. A non-JSON file in the directory is silently skipped; a malformed JSON file returns an error string but does not stop iteration. This makes batch loading robust to partial corruption.
+`LogValidator` runs three tiers: top-level structure → per-event field presence and value ranges → game-level consistency. It distinguishes errors (make the log unusable) from warnings (anomalies that are legal, e.g. turn-limit games with no winner).
 
-`LogValidator` runs three tiers of checks in order, stopping early if the structure is too broken to continue. Tier 1 checks top-level keys and player count consistency. Tier 2 iterates every event and checks field presence, value types, enum membership, and player index bounds. Tier 3 checks game-level consistency: event ordering, turn monotonicity, and that a winner is recorded. The validator distinguishes errors (structural violations that make the log unusable for training) from warnings (anomalies that are legal but worth knowing about, like a game that ended at the turn limit without a winner).
+`ParsedGame` exposes typed accessors (`action_events`, `winner_name`, `iter_action_contexts()`) used directly by the feature extractor. `iter_action_contexts()` yields each action paired with its subsequent reactions — the exact context window for building labelled training examples.
 
-`ParsedGame` is a typed wrapper that exposes convenient accessors for downstream code. The feature extractor in Sub-goal 2.4 will call `game.action_events` and `game.iter_action_contexts()` rather than scanning raw dicts. `iter_action_contexts()` is the key method: it yields each action event paired with the reactions that followed it (challenges, blocks, resolutions), which is exactly the context window needed to build labelled training examples.
-
-`load_logs(source, strict, verbose)` is the single public entry point for all downstream consumers. In non-strict mode (the default) it silently filters out invalid logs and reports a summary count. In strict mode it raises on the first invalid log, useful in CI to catch any simulator regression.
-
-The round-trip test class (`TestRoundTrip`) validates every log currently in `data/raw_logs/` under strict mode. This test runs as part of the normal test suite and will catch any future changes to `logger.py` that break the schema.
+`load_logs(source, strict, verbose)` is the single public entry point. Strict mode raises on the first invalid log; non-strict silently filters and reports a count.
 
 ---
 
-## What Phase 2 still needs (sub-goals 2.3–2.6)
+### Sub-goal 2.3 — Large-scale simulation
 
-- **2.3 Large-scale simulation** — run 100k+ games with mixed agent configurations and diverse player counts; save efficiently to `data/raw_logs/`
-- **2.4 Feature extraction** — convert a `(ParsedGame, event_index)` pair into a flat numpy vector ready for model input
-- **2.5 PyTorch Dataset** — wrap the feature extractor in `torch.utils.data.Dataset` for use in training loops
-- **2.6 Data quality report** — action frequency distributions, game length histograms, win rates by seat, bluff detection rates
+`pipeline/large_scale_sim.py` runs 18 named `BatchConfig`s covering 3 challenge/block probability tiers (low/med/high) × 3 player counts (2/4/6) × 2 agent types (Random/Honest), plus one mixed-seat batch. Games are distributed proportionally by weight; each config writes to its own subdirectory under `data/raw_logs/`. Agent RNGs are seeded deterministically from `game_seed × 100 + seat` so runs are fully reproducible. Throughput: ~370 games/sec; 100k games takes ~4.5 minutes.
+
+**Observed corpus statistics (2,200-game sample):**
+- Average game length: 17 turns (median 15, p95 35)
+- Most common action: Steal (24.4%), least: Coup (3.2%)
+- Challenge rate: 31.7% of actions; bluff rate: ~63%
+- Win rates by seat: roughly uniform (22–27%), no significant first-mover advantage
+
+---
+
+### Sub-goal 2.4 — Feature extraction
+
+`pipeline/feature_extractor.py` converts each action event in a `ParsedGame` into a 104-dim float32 vector. Fixed size regardless of player count (padded to 6-player maximum).
+
+| Section | Dims | Description |
+|---------|------|-------------|
+| My state | 12 | Revealed cards (×5), coins (÷12), influence (÷2), revealed proxy |
+| Opponents (×5 slots) | 40 | Per slot: influence, coins, revealed cards (×5), is_alive; zero-padded for absent players |
+| Action one-hot | 7 | Which of 7 action types was declared |
+| Claimed card | 6 | One-hot + "no claim" dim |
+| Meta scalars | 4 | target_is_me, actor_is_me, turn (÷500), table coins (÷72) |
+| Action history | 35 | One-hot counts of last 5 action types seen this game |
+
+Three label targets per sample: `action_label` (7-class), `target_label` (6-class including no-target), `outcome` (binary: did the action resolve?). A 100k-game corpus produces ~1.4 million training samples.
+
+---
+
+### Sub-goal 2.5 — PyTorch Dataset
+
+`pipeline/dataset.py` provides two Dataset classes:
+
+`CoupDataset` wraps pre-extracted numpy arrays. It applies z-score normalisation (fitted on training split only), supports `.split(val_fraction)` with consistent normalisation stats across splits, and serialises to/from `.npz` via `.save()` / `.load()`. Supports all three task heads (`"action"`, `"target"`, `"outcome"`) via the `task` parameter.
+
+`CoupStreamingDataset` extracts features on-the-fly from `ParsedGame` objects — useful during development when the full feature matrix doesn't fit in memory.
+
+`build_dataset(log_dir, task, save_path)` is the one-call end-to-end factory: loads all logs recursively → extracts features → returns a normalised `CoupDataset`, optionally saving to disk.
+
+---
+
+### Sub-goal 2.6 — Data quality report
+
+`pipeline/data_quality.py` walks the full corpus once and computes: action frequency distribution, win rates by seat, challenge rate and bluff detection rate per action type, block rate and hold rate per action type, influence loss breakdown by card, and feature-level statistics (mean, std, sparsity). Output is a formatted text report. Feature sparsity of ~78% is expected for this one-hot-heavy encoding.
+
+```bash
+python -m pipeline.data_quality --log_dir data/raw_logs --output data/quality_report.txt
+```
 
 ---
 
 ## What Phase 3 will add
 
-- `BeliefState` class: a `(n_players, n_cards)` probability matrix updated after every observable event
-- Bayesian update rules: seeing player X claim Duke reduces the prior probability that other players hold Duke
-- Consistency tracking: if two players both claim Duke in a 3-player game, one must be bluffing — the belief state captures this
-- The `Observation` dataclass gets a `belief_state` field (no other interface changes)
+Phase 3 builds the `BeliefState` — a probability distribution over each opponent's hidden cards, updated after every observable event.
+
+- `BeliefState` class: a `(n_players, n_cards)` probability matrix with Bayesian update rules
+- Update triggers: action claims (seeing a Duke claim reduces Duke probability for others), challenge results (a lost challenge proves the actor held the card), influence losses (revealed cards are removed from the distribution), Ambassador exchanges (hand composition shifts without revealing cards)
+- Consistency tracking: if two players claim Duke in a 3-player game, one must be bluffing — the belief state captures this tension
+- The `Observation` dataclass gains a `belief_state` field; no other agent interface changes
+- The feature vector in Phase 2.4 will be extended with belief state columns, increasing from 104 to ~154 dims
+ENDOFREADME

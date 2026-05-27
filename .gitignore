@@ -1,3 +1,5 @@
 __pycache__*
 .pytest_cache
 data
+coup/agents/__pycache__
+tests/__pycache__
