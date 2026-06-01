@@ -211,9 +211,14 @@ class Observation:
     What a specific player can observe at a point in the game.
     This is the primary input structure passed to every agent decision method.
 
-    In later phases this will be extended with:
-      - action_history: list of past events
-      - belief_state: probability distribution over opponents' hidden cards
+    Phase 1 fields: own hand, coins, revealed cards, other players' public
+    views, deck size, current player index, turn number.
+
+    Phase 3 fields (optional, None if belief tracker not active):
+      belief_state:   BeliefState — probability distribution over each
+                      opponent's hidden cards. None until Phase 3 is wired in.
+      opponent_model: OpponentModel — per-player bluff rate estimates.
+                      None until Phase 3 is wired in.
     """
 
     my_idx: int
@@ -225,8 +230,12 @@ class Observation:
     current_player_idx: int
     turn_number: int
 
+    # Phase 3 — belief tracker (Optional so Phase 1/2 code is unchanged)
+    belief_state: Optional[Any] = None    # belief.BeliefState | None
+    opponent_model: Optional[Any] = None  # belief.OpponentModel | None
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "my_idx": self.my_idx,
             "my_hand": [c.value for c in self.my_hand],
             "my_coins": self.my_coins,
@@ -236,10 +245,17 @@ class Observation:
             "current_player_idx": self.current_player_idx,
             "turn_number": self.turn_number,
         }
+        if self.belief_state is not None:
+            d["belief_state"] = self.belief_state.to_dict()
+        if self.opponent_model is not None:
+            d["opponent_model"] = self.opponent_model.to_dict()
+        return d
 
     def __repr__(self) -> str:
         hand = [c.value for c in self.my_hand]
+        has_belief = self.belief_state is not None
         return (
             f"Observation(player={self.my_idx}, hand={hand}, "
-            f"coins={self.my_coins}, turn={self.turn_number})"
+            f"coins={self.my_coins}, turn={self.turn_number}, "
+            f"belief={'yes' if has_belief else 'no'})"
         )

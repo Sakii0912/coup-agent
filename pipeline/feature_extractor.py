@@ -4,39 +4,44 @@ pipeline/feature_extractor.py — Convert game log events into feature vectors.
 Each observable decision point in a game log is converted to a flat numpy
 vector that captures everything the acting player could see at that moment.
 
-Feature vector layout (total: 135 dims for 6-player games, scales with n_players):
-─────────────────────────────────────────────────────────────────────────────────
-  Section               Dims    Description
-─────────────────────────────────────────────────────────────────────────────────
-  My hand               5       One-hot per card (Duke/Assassin/Contessa/Captain/Ambassador)
-                                Double-count for two copies (can be 0, 1, or 2 per card)
-  My coins              1       Normalised (÷ 12)
-  My influence          1       Remaining influence (0–2, normalised ÷ 2)
-  My revealed cards     5       One-hot count of my revealed cards
-  Opponents (×5 slots)  6 each  [influence_count/2, coins/12, 4×revealed card one-hot count,
-                                 is_alive] — padded with zeros for absent players
-  Action type           7       One-hot (Income/ForeignAid/Coup/Tax/Assassinate/Steal/Exchange)
-  Claimed card          6       One-hot + "no claim" dim (None = index 5)
-  Target is me          1       Binary: is the action targeting this player?
-  Actor is me           1       Binary: is this player the actor?
-  Turn number           1       Normalised (÷ 500)
-  Coins on table        1       Sum of all players' coins, normalised (÷ 72)
-  Action history        7×5=35  One-hot counts of last 5 action types seen this game
-─────────────────────────────────────────────────────────────────────────────────
+Feature vector layout (Phase 2 base: 104 dims; Phase 3 full: 134 dims)
+─────────────────────────────────────────────────────────────────────────────
+  Section                  Dims    Description
+─────────────────────────────────────────────────────────────────────────────
+  My state                 12      Revealed cards (×5), coins/12, influence/2,
+                                   revealed proxy
+  Opponents (×5 slots)     40      Per slot: influence/2, coins/12, revealed
+                                   cards (×5), is_alive; zero-padded if absent
+  Action type               7      One-hot (Income … Exchange)
+  Claimed card              6      One-hot + "no claim" dim
+  Meta scalars              4      target_is_me, actor_is_me, turn/500, table_coins/72
+  Action history           35      One-hot counts of last 5 action types
+  ── Phase 3 (optional) ──────────────────────────────────────────────────
+  Belief state probs       30      Flattened (n_players × N_CARDS) prob matrix
+                                   (include_belief=True only)
+  Opponent credibilities    6      Per-player credibility score from OpponentModel
+                                   (include_opp_model=True only)
+─────────────────────────────────────────────────────────────────────────────
+
+Phase 2 (default):  FeatureConfig()                       → 104 dims
+Phase 3 (belief):   FeatureConfig(include_belief=True,
+                                  include_opp_model=True)  → 134 dims
 
 Label vector layout:
-  Action label          7       One-hot index into ActionType for the chosen action
-  Target label          6       One-hot index into player slot (5 opponents + "no target")
-  Outcome               1       1 = actor won this turn (action resolved), 0 = blocked/failed
-─────────────────────────────────────────────────────────────────────────────────
+  Action label  7   Index into ActionType for the chosen action
+  Target label  6   Index into player slot (5 opponents + "no target")
+  Outcome       1   1 = action resolved, 0 = blocked/failed
+─────────────────────────────────────────────────────────────────────────────
 
 Usage:
-    from pipeline.feature_extractor import extract_features, FeatureConfig, FEATURE_DIM
+    # From game logs (Phase 2 path)
+    from pipeline.feature_extractor import extract_features, FeatureConfig
+    config = FeatureConfig(include_belief=False)
+    samples = extract_features(parsed_game, config)
 
-    config = FeatureConfig(max_players=6)
-    samples = extract_features(parsed_game, config)   # List[Sample]
-    for s in samples:
-        print(s.features.shape, s.action_label, s.outcome)
+    # From a live Observation (Phase 3 / Phase 5 path)
+    from pipeline.feature_extractor import features_from_observation
+    feat = features_from_observation(obs, config)   # shape (134,) with belief
 """
 
 from __future__ import annotations
@@ -75,26 +80,48 @@ class FeatureConfig:
     """
     Controls dimensionality of the feature vector.
 
-    max_players: maximum number of opponent slots to encode.
-                 Set to 5 (for up to 6 total players) for a fixed-size
-                 vector that works for any game size.
+    max_players:       Maximum number of opponent slots to encode.
+                       Set to 6 (default) for a fixed-size vector that works
+                       for any game size.
+    include_belief:    If True, append belief state probs (n_players × N_CARDS
+                       = 30 dims for max_players=6) to the feature vector.
+    include_opp_model: If True, append opponent credibility scores (max_players
+                       dims, one per player) to the feature vector.
+
+    Phase 2 code (include_belief=False, include_opp_model=False) produces
+    the original 104-dim vector — fully backward compatible.
+    Phase 3 code (include_belief=True, include_opp_model=True) produces a
+    134-dim vector.
     """
-    max_players: int = 6                # total including self → 5 opponent slots
+    max_players:       int  = 6
+    include_belief:    bool = False   # Phase 3: off by default for backward compat
+    include_opp_model: bool = False   # Phase 3: off by default for backward compat
 
     @property
     def n_opponent_slots(self) -> int:
         return self.max_players - 1     # 5 for max_players=6
 
     @property
+    def belief_dims(self) -> int:
+        """Dims added by the belief state: one prob per (player, card) pair."""
+        return self.max_players * N_CARDS if self.include_belief else 0
+
+    @property
+    def opp_model_dims(self) -> int:
+        """Dims added by the opponent model: one credibility score per player."""
+        return self.max_players if self.include_opp_model else 0
+
+    @property
     def feature_dim(self) -> int:
         """Total feature vector length."""
-        my_dims       = N_CARDS + 1 + 1 + N_CARDS          # hand + coins + influence + revealed
-        opp_dims      = self.n_opponent_slots * (1 + 1 + N_CARDS + 1)  # per slot: influence, coins, revealed×5, is_alive
-        action_dims   = N_ACTIONS                           # action one-hot
-        claimed_dims  = N_CARDS + 1                         # card + "no claim"
-        meta_dims     = 1 + 1 + 1 + 1                      # target_is_me, actor_is_me, turn, table_coins
-        history_dims  = N_ACTIONS * HISTORY_LENGTH
-        return my_dims + opp_dims + action_dims + claimed_dims + meta_dims + history_dims
+        my_dims      = N_CARDS + 1 + 1 + N_CARDS           # hand + coins + influence + revealed
+        opp_dims     = self.n_opponent_slots * (1 + 1 + N_CARDS + 1)
+        action_dims  = N_ACTIONS
+        claimed_dims = N_CARDS + 1
+        meta_dims    = 4                                    # target_is_me, actor_is_me, turn, table_coins
+        history_dims = N_ACTIONS * HISTORY_LENGTH
+        base = my_dims + opp_dims + action_dims + claimed_dims + meta_dims + history_dims
+        return base + self.belief_dims + self.opp_model_dims
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +296,8 @@ def _build_feature_vector(
     turn: int,
     action_history: List[str],
     config: FeatureConfig,
+    belief_probs: Optional[np.ndarray] = None,      # shape (n_players, N_CARDS) or None
+    opp_credibilities: Optional[np.ndarray] = None, # shape (n_players,) or None
 ) -> np.ndarray:
     """Assemble the full feature vector as a float32 numpy array."""
     parts: List[np.ndarray] = []
@@ -337,6 +366,24 @@ def _build_feature_vector(
             history_vec[slot_h * N_ACTIONS + ACTION_TO_IDX[past_action]] = 1.0
     parts.append(history_vec)
 
+    # ── Belief state (Phase 3) ────────────────────────────────────────────
+    if config.include_belief:
+        belief_vec = np.zeros(config.max_players * N_CARDS, dtype=np.float32)
+        if belief_probs is not None:
+            # Flatten (n_players, N_CARDS) → ordered by player then card
+            flat = belief_probs.flatten().astype(np.float32)
+            n = min(len(flat), len(belief_vec))
+            belief_vec[:n] = flat[:n]
+        parts.append(belief_vec)
+
+    # ── Opponent model credibilities (Phase 3) ────────────────────────────
+    if config.include_opp_model:
+        cred_vec = np.ones(config.max_players, dtype=np.float32)
+        if opp_credibilities is not None:
+            n = min(len(opp_credibilities), config.max_players)
+            cred_vec[:n] = opp_credibilities[:n].astype(np.float32)
+        parts.append(cred_vec)
+
     return np.concatenate(parts).astype(np.float32)
 
 
@@ -347,6 +394,95 @@ def _card_counts(cards: List[str]) -> np.ndarray:
         if c in CARD_TO_IDX:
             vec[CARD_TO_IDX[c]] += 1.0
     return vec
+
+
+# ---------------------------------------------------------------------------
+# Live extraction from Observation (Phase 3 / Phase 5 path)
+# ---------------------------------------------------------------------------
+
+def features_from_observation(
+    obs,                              # coup.state.Observation
+    action_type: str,
+    target_idx: Optional[int],
+    claimed_card: Optional[str],
+    action_history: List[str],
+    config: Optional[FeatureConfig] = None,
+) -> np.ndarray:
+    """
+    Extract a feature vector directly from a live Observation object.
+
+    This is the entry point used by the Phase 5 live interface and by agents
+    during self-play (Phase 4). It builds the same feature vector as
+    `_build_feature_vector` but reads its inputs from an `Observation` rather
+    than from log event dicts.
+
+    If the Observation contains a `belief_state` and/or `opponent_model` and
+    `config.include_belief` / `config.include_opp_model` are True, those
+    sections are populated from the live belief tracker.
+
+    Args:
+        obs:            Observation object (from coup.state).
+        action_type:    String name of the action being taken.
+        target_idx:     Absolute player index of the target, or None.
+        claimed_card:   String card name claimed, or None.
+        action_history: List of action type strings seen so far this game.
+        config:         FeatureConfig. Defaults to FeatureConfig() (Phase 2 dims).
+
+    Returns:
+        Float32 numpy array of shape (config.feature_dim,).
+    """
+    if config is None:
+        config = FeatureConfig()
+
+    # Build a state snapshot from the Observation
+    # The observer's own slot uses known hand data; others use public view.
+    state: List[Dict[str, Any]] = []
+    n_players = len(obs.others) + 1
+
+    # Reconstruct full player list in absolute index order
+    others_by_idx = {p["idx"]: p for p in obs.others}
+    for p_idx in range(n_players):
+        if p_idx == obs.my_idx:
+            state.append({
+                "name": f"P{p_idx}",
+                "idx": p_idx,
+                "coins": obs.my_coins,
+                "influence_count": len(obs.my_hand),
+                "revealed_cards": [c.value for c in obs.my_revealed],
+                "is_alive": len(obs.my_hand) > 0,
+            })
+        elif p_idx in others_by_idx:
+            state.append(others_by_idx[p_idx])
+        else:
+            # Absent slot (shouldn't happen in valid games)
+            state.append({
+                "name": f"P{p_idx}", "idx": p_idx, "coins": 0,
+                "influence_count": 0, "revealed_cards": [], "is_alive": False,
+            })
+
+    # Extract belief probs and credibilities if available
+    belief_probs     = None
+    opp_credibilities = None
+
+    if config.include_belief and obs.belief_state is not None:
+        belief_probs = obs.belief_state.probs   # (n_players, N_CARDS)
+
+    if config.include_opp_model and obs.opponent_model is not None:
+        opp_credibilities = obs.opponent_model.all_credibilities()  # (n_players,)
+
+    return _build_feature_vector(
+        actor_idx=obs.my_idx,
+        action_type=action_type,
+        target_idx=target_idx,
+        claimed_card=claimed_card,
+        state=state,
+        n_players=n_players,
+        turn=obs.turn_number,
+        action_history=action_history,
+        config=config,
+        belief_probs=belief_probs,
+        opp_credibilities=opp_credibilities,
+    )
 
 
 # ---------------------------------------------------------------------------

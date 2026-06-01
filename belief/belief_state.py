@@ -81,6 +81,7 @@ N_CARDS: int = len(CARDS)                              # 5
 CARD_TO_IDX: Dict[Card, int] = {c: i for i, c in enumerate(CARDS)}
 TOTAL_CARDS: int = len(DECK_COMPOSITION)               # 15
 COPIES_PER_CARD: int = TOTAL_CARDS // N_CARDS          # 3
+CERTAINTY_THRESHOLD: float = 1e-9                      # values within this of 0 or 1 are treated as pinned
 
 
 # ---------------------------------------------------------------------------

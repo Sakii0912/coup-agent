@@ -101,6 +101,7 @@ from .belief_state import (
     N_CARDS,
     CARD_TO_IDX,
     COPIES_PER_CARD,
+    CERTAINTY_THRESHOLD,
     hypergeometric_at_least_one,
     _encode_known_hand,
 )
@@ -110,9 +111,8 @@ from .belief_state import (
 # Tunable constants
 # ---------------------------------------------------------------------------
 
-# How much a claim shifts beliefs toward the actor.
+# Flat fallback credibility used when no OpponentModel is provided.
 # 1.0 = no shift. 2.0 = claim doubles actor's probability for that card.
-# Sub-goal 3.4 will override this with a per-player learned value.
 CLAIM_CREDIBILITY: float = 1.5
 
 
@@ -124,16 +124,39 @@ class BeliefUpdater:
     """
     Applies Bayesian update rules to a BeliefState for each observable event.
 
-    Usage:
-        updater = BeliefUpdater(n_players=4)
-        updater.update(belief, event_type, **kwargs)
+    After every update, the constraint normaliser is automatically called to
+    enforce global deck conservation (sub-goal 3.3). Pass
+    `auto_normalise=False` to skip this (e.g. when batching multiple events
+    before normalising once).
 
-    All update methods mutate `belief` in place. Call `belief.copy()` first
-    if you need to preserve the previous state.
+    When an `opponent_model` is provided (sub-goal 3.4), per-player credibility
+    scores replace the flat CLAIM_CREDIBILITY constant on every claim update.
+    The opponent model is also updated automatically from challenge_result events.
+
+    Usage:
+        from belief.opponent_model import OpponentModel
+        model   = OpponentModel(n_players=4, observer_idx=0)
+        updater = BeliefUpdater(n_players=4, opponent_model=model)
+        updater.update(belief, "action", actor_idx=1, claimed_card=Card.DUKE)
+        updater.update(belief, "challenge_result",
+                       actor_idx=1, claimed_card=Card.DUKE,
+                       challenger_idx=0, actor_won=False)
+        # model now records P1 as a bluffer; future Duke claims by P1 shift
+        # beliefs less strongly.
     """
 
-    def __init__(self, n_players: int) -> None:
-        self.n_players = n_players
+    def __init__(
+        self,
+        n_players: int,
+        auto_normalise: bool = True,
+        opponent_model=None,          # Optional[OpponentModel]
+    ) -> None:
+        self.n_players      = n_players
+        self.auto_normalise = auto_normalise
+        self.opponent_model = opponent_model
+
+        from .constraint_normaliser import ConstraintNormaliser
+        self._normaliser = ConstraintNormaliser()
 
     # ------------------------------------------------------------------ #
     #  Main dispatch                                                      #
@@ -172,6 +195,12 @@ class BeliefUpdater:
             self._update_on_claim(belief, actor_idx, claimed_card)
 
         elif event_type == "challenge_result":
+            # Update opponent model BEFORE belief update so the result is
+            # immediately reflected if any follow-up claim happens this turn.
+            if (self.opponent_model is not None
+                    and actor_idx is not None
+                    and actor_won is not None):
+                self.opponent_model.record_challenge_result(actor_idx, actor_won)
             self._update_on_challenge_result(
                 belief, actor_idx, claimed_card, challenger_idx, actor_won
             )
@@ -188,6 +217,10 @@ class BeliefUpdater:
 
         # All other event types carry no new card information — no-op.
 
+        # Enforce global deck constraints after every mutating update
+        if self.auto_normalise:
+            self._normaliser.normalise(belief)
+
     # ------------------------------------------------------------------ #
     #  Update rules                                                       #
     # ------------------------------------------------------------------ #
@@ -201,17 +234,23 @@ class BeliefUpdater:
         """
         Likelihood ratio update when a player claims to hold a card.
 
-        The claim is weak positive evidence for the actor holding the card,
-        and weak negative evidence for all other players (zero-sum card pool).
-
-        After scaling, each affected player's probability is re-anchored to
-        [0, 1] using the hypergeometric prior as a ceiling.
+        The credibility multiplier is sourced from the OpponentModel if
+        available; otherwise falls back to the flat CLAIM_CREDIBILITY constant.
+        A known bluffer gets a low multiplier (claim barely shifts beliefs).
+        A consistently honest player gets a high multiplier (claim strongly
+        shifts beliefs toward them).
         """
         c_idx = CARD_TO_IDX[claimed_card]
 
         # Skip if actor is the observer (own hand is already certain)
         if actor_idx == belief.observer_idx and belief.known_hand is not None:
             return
+
+        # Resolve per-player credibility
+        if self.opponent_model is not None:
+            credibility = self.opponent_model.credibility(actor_idx)
+        else:
+            credibility = CLAIM_CREDIBILITY
 
         for p_idx in range(self.n_players):
             inf = belief.influence_counts[p_idx]
@@ -221,14 +260,14 @@ class BeliefUpdater:
                 continue  # Own hand — never update from claims
 
             current = belief.probs[p_idx, c_idx]
+            prior = _hypergeometric_prior(belief, p_idx, c_idx)
 
             if p_idx == actor_idx:
-                # Repeated claims should keep pushing the actor upward.
-                updated = min(current * CLAIM_CREDIBILITY, 1.0)
+                # Scale up toward the prior ceiling
+                updated = min(current * credibility, prior)
             else:
                 # Scale down — card less likely to be elsewhere
-                # Floor at 0 but don't go below a small epsilon
-                updated = max(current / CLAIM_CREDIBILITY, 0.0)
+                updated = max(current / credibility, 0.0)
 
             belief.probs[p_idx, c_idx] = float(np.clip(updated, 0.0, 1.0))
 
@@ -365,25 +404,39 @@ class BeliefUpdater:
     ) -> None:
         """
         After setting probs[p_idx, excluded_c_idx] = 0.0, rescale the
-        remaining card probabilities without resurrecting cards that were
-        already ruled out by earlier bluff detections.
+        remaining card probabilities to account for the additional certainty.
+
+        Cells that are already exactly 0.0 (from prior bluff detections) are
+        treated as pinned — they must not be raised during redistribution.
         """
         row = belief.probs[p_idx].copy()
-        row[excluded_c_idx] = 0.0
 
-        remaining_mask = row > 0.0
-        total_after = row[remaining_mask].sum()
+        # Identify all currently-zero cells (hard evidence — must stay 0)
+        zero_mask = row < CERTAINTY_THRESHOLD
+        zero_mask[excluded_c_idx] = True   # also pin the newly excluded cell
+
+        row[zero_mask] = 0.0
+
+        total_after = row.sum()
         if total_after < 1e-9:
-            # All cards excluded — shouldn't happen, reset to flat prior
             self._recompute_row_prior(belief, p_idx)
-            belief.probs[p_idx, excluded_c_idx] = 0.0
+            belief.probs[p_idx, zero_mask] = 0.0
             return
 
-        # Scale only the surviving positive entries, preserving earlier zeros.
-        scale = belief.probs[p_idx].sum() / total_after
-        row[remaining_mask] = np.clip(row[remaining_mask] * scale, 0.0, 1.0)
+        prior = np.array([
+            _hypergeometric_prior(belief, p_idx, c_idx)
+            for c_idx in range(N_CARDS)
+        ])
+        prior[zero_mask] = 0.0
+        prior_sum = prior.sum()
 
-        row[excluded_c_idx] = 0.0
+        if prior_sum > 1e-9:
+            scale = total_after / prior_sum
+            row = np.clip(prior * scale, 0.0, 1.0)
+        else:
+            row = np.clip(row, 0.0, 1.0)
+
+        row[zero_mask] = 0.0
         belief.probs[p_idx] = row
 
 
