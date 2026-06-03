@@ -10,7 +10,7 @@ A Python project to build a competitive AI agent for the card game **Coup** usin
 |-------|------|--------|
 | **1 — Game Engine** | Model rules, state, actions, resolution, self-play | ✅ Complete |
 | **2 — Data Pipeline** | Dataset search, log parsing, large-scale simulation, feature extraction | ✅ Complete |
-| **3 — Belief Tracker** | Bayesian inference over hidden opponent cards | 🔜 Next |
+| **3 — Belief Tracker** | Bayesian inference over hidden opponent cards | ✅ Complete |
 | **4 — Agent Training** | CFR self-play + neural net policy | 🔜 |
 | **5 — Live Interface** | Input game state → get best action recommendation | 🔜 |
 
@@ -24,6 +24,17 @@ A Python project to build a competitive AI agent for the card game **Coup** usin
 | 2.4 — Feature extraction | Convert log events into 104-dim float32 numpy vectors | ✅ Complete |
 | 2.5 — PyTorch Dataset | `CoupDataset` and `CoupStreamingDataset` with split, save, load | ✅ Complete |
 | 2.6 — Data quality report | Action distributions, win rates, bluff rates, feature stats | ✅ Complete |
+
+### Phase 3 sub-goals
+
+| Sub-goal | Description | Status |
+|----------|-------------|--------|
+| 3.1 — Prior distribution | Hypergeometric prior over hidden cards | ✅ Complete |
+| 3.2 — Bayesian update rules | One update rule per observable event type | ✅ Complete |
+| 3.3 — Constraint normalisation | Sinkhorn-style global deck conservation enforcement | ✅ Complete |
+| 3.4 — Bluff modelling | Beta-posterior per-player bluff rate and credibility scores | ✅ Complete |
+| 3.5 — Observation integration | BeliefState + OpponentModel wired into Observation; 104→140-dim feature vector | ✅ Complete |
+| 3.6 — Tests and validation | BeliefTracker orchestrator; mathematical + behavioural + log replay tests | ✅ Complete |
 
 ---
 
@@ -54,12 +65,26 @@ coup_agent/
 │   ├── dataset.py                  # CoupDataset, CoupStreamingDataset, build_dataset()
 │   └── data_quality.py             # Corpus statistics and formatted quality report
 │
+├── belief/                         # Phase 3: belief tracker
+│   ├── __init__.py
+│   ├── belief_state.py             # BeliefState, hypergeometric prior, constructors
+│   ├── belief_updater.py           # Bayesian update rules, auto-normalisation
+│   ├── constraint_normaliser.py    # Sinkhorn column/row normaliser, pin mask
+│   ├── opponent_model.py           # Beta-posterior bluff rate tracker, credibility scores
+│   └── belief_tracker.py          # BeliefTracker orchestrator (all components)
+│
 ├── tests/
 │   ├── test_cards_and_state.py     # Unit: deck, state, observations, legal actions (46)
 │   ├── test_resolution.py          # Unit: challenge resolution, action effects (15)
 │   ├── test_game_integration.py    # Integration: full games, log structure, invariants (31)
 │   ├── test_log_parser.py          # Unit + round-trip: parser and validator (72)
-│   └── test_pipeline_phase2.py     # Unit + integration: sim, features, dataset, report (70)
+│   ├── test_pipeline_phase2.py     # Unit + integration: sim, features, dataset, report (70)
+│   ├── test_belief_state_prior.py      # Unit: prior distribution, hypergeometric maths (71)
+│   ├── test_belief_updater.py          # Unit: all Bayesian update rules (59)
+│   ├── test_constraint_normaliser.py   # Unit: Sinkhorn normaliser, pin mask (42)
+│   ├── test_opponent_model.py          # Unit: bluff rate tracking, credibility (63)
+│   ├── test_observation_integration.py # Integration: Observation fields, feature dims (45)
+│   └── test_belief_tracker.py          # End-to-end: orchestrator + log replay (varies)
 │
 ├── simulator.py                    # Single-config self-play CLI (quick runs / dev)
 ├── data/
@@ -87,7 +112,7 @@ pip install -r requirements.txt
 ### Run the full test suite
 
 ```bash
-python -m pytest tests/ -v          # 234 tests, all should pass
+python -m pytest tests/ -v          # 540 tests, all should pass
 python -m pytest tests/ -q          # quiet summary
 python -m pytest tests/ --cov=coup --cov-report=term-missing
 ```
@@ -140,6 +165,32 @@ x_batch, y_batch = next(iter(loader))   # x: (256, 104)  y: (256,)
 ```python
 from pipeline.dataset import CoupDataset
 ds = CoupDataset.load("data/dataset_action.npz", task="action")
+```
+
+### Use the belief tracker during a game
+
+```python
+from belief.belief_tracker import BeliefTracker
+from coup.cards import Card
+
+# Initialise at game start
+tracker = BeliefTracker.from_game_start(
+    n_players=4, observer_idx=0,
+    known_hand=[Card.DUKE, Card.ASSASSIN]
+)
+
+# Feed events as they happen
+tracker.process_raw("action", actor_idx=1, claimed_card=Card.DUKE)
+tracker.process_raw("challenge_result", actor_idx=1, claimed_card=Card.DUKE,
+                    challenger_idx=2, actor_won=False)
+
+print(tracker.prob(1, Card.DUKE))       # 0.0 — bluff detected
+print(tracker.credibility(1))           # < 1.0 — known bluffer
+print(tracker.is_consistent())          # True
+
+# Attach to Observation for feature extraction
+obs = game_state.get_observation(0)
+tracker.enrich_observation(obs)         # obs.belief_state and obs.opponent_model now set
 ```
 
 ### Run the data quality report
@@ -249,7 +300,7 @@ All game rules that are pure data live here. `ACTION_CLAIMS` maps each character
 
 `GameState.new_game()` is the only normal constructor. Passing `seed` makes the deal fully reproducible, critical for test scenarios. `advance_turn()` skips dead players while keeping their slot so indices stay stable.
 
-`Observation` is the per-player view passed to every agent decision. It currently carries: own hand, own coins, own revealed cards, public view of all other players, deck size, current player index, and turn number. In Phase 3 a `belief_state` field will be added here with no other interface changes.
+`Observation` is the per-player view passed to every agent decision. It currently carries: own hand, own coins, own revealed cards, public view of all other players, deck size, current player index, and turn number. Observation now carries two optional Phase 3 fields: belief_state (a BeliefState probability matrix) and opponent_model (an OpponentModel with per-player credibility scores). Both default to None so all Phase 1/2 code is unchanged. Use BeliefTracker.enrich_observation(obs) to populate them.
 
 ---
 
@@ -332,7 +383,7 @@ A thorough search of BoardGameArena, GitHub, Kaggle, and academic sources confir
 
 ### Sub-goal 2.4 — Feature extraction
 
-`pipeline/feature_extractor.py` converts each action event in a `ParsedGame` into a 104-dim float32 vector. Fixed size regardless of player count (padded to 6-player maximum).
+`pipeline/feature_extractor.py` converts each action event into a float32 vector. Phase 2 (default): 104 dims. Phase 3 (`FeatureConfig(include_belief=True, include_opp_model=True)`): 140 dims, adding a 30-dim belief probability matrix and 6-dim credibility vector. A new `features_from_observation(obs, ...)` function extracts directly from a live `Observation` for use in Phase 4/5.
 
 | Section | Dims | Description |
 |---------|------|-------------|
@@ -342,6 +393,8 @@ A thorough search of BoardGameArena, GitHub, Kaggle, and academic sources confir
 | Claimed card | 6 | One-hot + "no claim" dim |
 | Meta scalars | 4 | target_is_me, actor_is_me, turn (÷500), table coins (÷72) |
 | Action history | 35 | One-hot counts of last 5 action types seen this game |
+| Belief state probs | 30 | Flattened (n_players × 5) probability matrix (Phase 3 only) |
+| Opponent credibilities | 6 | Per-player credibility scores from OpponentModel (Phase 3 only) |
 
 Three label targets per sample: `action_label` (7-class), `target_label` (6-class including no-target), `outcome` (binary: did the action resolve?). A 100k-game corpus produces ~1.4 million training samples.
 
@@ -369,13 +422,35 @@ python -m pipeline.data_quality --log_dir data/raw_logs --output data/quality_re
 
 ---
 
-## What Phase 3 will add
+## Phase 3 — Implementation Notes
 
-Phase 3 builds the `BeliefState` — a probability distribution over each opponent's hidden cards, updated after every observable event.
+### Sub-goals 3.1–3.3 — BeliefState, updates, and normalisation
 
-- `BeliefState` class: a `(n_players, n_cards)` probability matrix with Bayesian update rules
-- Update triggers: action claims (seeing a Duke claim reduces Duke probability for others), challenge results (a lost challenge proves the actor held the card), influence losses (revealed cards are removed from the distribution), Ambassador exchanges (hand composition shifts without revealing cards)
-- Consistency tracking: if two players claim Duke in a 3-player game, one must be bluffing — the belief state captures this tension
-- The `Observation` dataclass gains a `belief_state` field; no other agent interface changes
-- The feature vector in Phase 2.4 will be extended with belief state columns, increasing from 104 to ~154 dims
-ENDOFREADME
+`belief/belief_state.py` holds the `(n_players, N_CARDS)` probability matrix and computes the prior using the hypergeometric distribution: given `available[c]` copies of card `c` in the unknown pool and a player with `k` hidden cards, `P(holds ≥1 copy) = 1 - C(pool - available[c], k) / C(pool, k)`. Three constructors cover live self-play (`from_game_state`), log replay (`from_public_snapshot`), and direct initialisation.
+
+`belief/belief_updater.py` applies one update rule per event: claims scale actor probability up and others down via a credibility multiplier; challenge wins reset the actor's row to the prior (card swap removes information); challenge losses pin the bluffed card to 0.0; influence losses decrement `available[]` and recompute all rows; exchanges reset the actor's row to maximum uncertainty. The constraint normaliser runs automatically after every update.
+
+`belief/constraint_normaliser.py` runs a Sinkhorn-style column/row pass until convergence. The column pass scales down free cells when column sums exceed `available[c]`. The row pass clips to the hypergeometric prior ceiling. A pin mask protects three categories: the observer's own row, dead player rows, and hard-zero cells (bluff-detected certainties).
+
+### Sub-goal 3.4 — Bluff modelling
+
+`belief/opponent_model.py` models each player's bluff tendency as `Beta(α, β)` with a `Beta(2, 2)` prior. Each challenge result increments either `α` (bluff) or `β` (honest). The credibility multiplier is `β/α` clamped to `[0.1, 5.0]`, replacing the flat constant in the claim update rule. A known bluffer's claims shift beliefs ~50× less than a consistently honest player's.
+
+### Sub-goal 3.5 — Observation integration
+
+`Observation` gains two optional fields (`belief_state`, `opponent_model`, both `None` by default). `FeatureConfig` gains `include_belief` and `include_opp_model` flags — Phase 2 104-dim output is fully preserved. Phase 3 full config (`include_belief=True, include_opp_model=True`) produces 140 dims. `features_from_observation()` is the live extraction entry point for Phase 4/5.
+
+### Sub-goal 3.6 — BeliefTracker
+
+`belief/belief_tracker.py` is the single object agents interact with. It owns all four components and exposes `process_event(parsed_event)` for log replay and `process_raw(event_type, **kwargs)` for the game engine. `enrich_observation(obs)` attaches belief and model to any `Observation`. `snapshot()` / `restore()` enable MCTS rollouts. `replay_game(parsed_game)` reconstructs full belief history from a log.
+
+---
+
+## What Phase 4 will add
+
+Phase 4 builds the trained policy agent using CFR self-play and/or a neural network.
+
+- `agents/cfr_agent.py` — Counterfactual Regret Minimization solver for information-set game trees
+- `agents/neural_agent.py` — Policy network trained on the Phase 2/3 feature vectors
+- Self-play training loop with BeliefTracker attached to each seat
+- Evaluation framework comparing CFR, neural, random, and honest agents
