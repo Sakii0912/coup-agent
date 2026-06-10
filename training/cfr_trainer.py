@@ -63,8 +63,8 @@ class CFRConfig:
     use_cfr_plus:   bool  = True
     seed:           int   = 0
     save_every:     int   = 1_000    # save checkpoint every N iterations
-    log_every:      int   = 100      # print + log progress every N iterations
-    max_depth:      int   = 200      # max tree depth per traversal
+    log_every:      int   = 1        # print + log progress every N iterations
+    max_depth:      int   = 50       # max tree depth per traversal
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,6 @@ class CFRTrainer:
             output_dir=output_dir,
             config=config,
         )
-        trainer.solver.table = table
         print(f"Resumed from {checkpoint_path!r} "
               f"({table.n_iterations:,} iterations, "
               f"{table.n_infosets:,} infosets)")
@@ -152,7 +151,12 @@ class CFRTrainer:
         while i < n_iterations:
             # Run a chunk up to the next log point
             chunk = min(cfg.log_every, n_iterations - i)
-            self.solver.run(n_iterations=chunk, show_progress=False)
+            print(f"  running iterations {i + 1:,}-{i + chunk:,}...", flush=True)
+            self.solver.run(
+                n_iterations=chunk,
+                show_progress=True,
+                progress_every=max(1, min(10, chunk)),
+            )
             i += chunk
 
             total_iter = self.solver.table.n_iterations

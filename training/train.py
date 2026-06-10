@@ -42,6 +42,7 @@ def cmd_cfr(args: argparse.Namespace) -> None:
         seed         = args.seed,
         save_every   = args.save_every,
         log_every    = args.log_every,
+        max_depth    = args.max_depth,
     )
 
     if args.resume:
@@ -135,7 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Path to checkpoint to resume from")
     p_cfr.add_argument("--seed",        type=int,   default=0)
     p_cfr.add_argument("--save_every",  type=int,   default=1_000)
-    p_cfr.add_argument("--log_every",   type=int,   default=100)
+    p_cfr.add_argument("--log_every",   type=int,   default=1,
+                       help="Print progress and log checkpoints every N iterations")
+    p_cfr.add_argument("--max_depth",   type=int,   default=50,
+                       help="Maximum CFR traversal depth per turn")
     p_cfr.add_argument("--vanilla_cfr", action="store_true",
                        help="Use vanilla CFR instead of CFR+")
 

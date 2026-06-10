@@ -70,6 +70,15 @@ class PlayerState:
         self.hand.append(new_card)
         return new_card
 
+    def copy(self) -> "PlayerState":
+        return PlayerState(
+            name=self.name,
+            idx=self.idx,
+            hand=self.hand.copy(),
+            revealed=self.revealed.copy(),
+            coins=self.coins,
+        )
+
     # ---- Serialisation ----------------------------------------------------
 
     def public_view(self) -> Dict[str, Any]:
@@ -167,6 +176,14 @@ class GameState:
             idx = (idx + 1) % n
             visited += 1
         self.current_player_idx = idx
+
+    def copy(self) -> "GameState":
+        return GameState(
+            players=[player.copy() for player in self.players],
+            deck=self.deck.copy(),
+            current_player_idx=self.current_player_idx,
+            turn_number=self.turn_number,
+        )
 
     # ---- Observation ------------------------------------------------------
 

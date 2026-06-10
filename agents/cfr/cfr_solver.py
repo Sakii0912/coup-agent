@@ -57,7 +57,6 @@ context needed to reconstruct the tree (pending action, pending block, etc.).
 
 from __future__ import annotations
 
-import copy
 import math
 import random
 import time
@@ -115,7 +114,7 @@ class CoupTreeState:
 
     def copy(self) -> "CoupTreeState":
         return CoupTreeState(
-            game_state     = copy.deepcopy(self.game_state),
+            game_state     = self.game_state.copy(),
             turn_number    = self.turn_number,
             history        = list(self.history),
             pending_action = self.pending_action,
